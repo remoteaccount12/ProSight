@@ -67,7 +67,8 @@ def create_model(logger: TensorBoardLogger) -> TFTModel:
     return TFTModel(
         log_tensorboard=True,
         pl_trainer_kwargs={"logger": logger},
-        use_static_covariates=False,
+
+        use_static_covariates=True,
         add_relative_index=True,
         **MODEL_PARAMS,
     )
