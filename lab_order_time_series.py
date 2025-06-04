@@ -1,12 +1,17 @@
 import os
 from datetime import datetime
-from typing import List
+
+
+
+from typing import List, Tuple
 
 import pandas as pd
 from darts import TimeSeries
 from darts.dataprocessing.transformers import Scaler
 from darts.models import TFTModel
 from pytorch_lightning.loggers import TensorBoardLogger
+
+import pickle
 
 
 # -------------------------------
@@ -18,6 +23,8 @@ LOG_DIR = "logs"
 PLOTS_DIR = "plots"
 MODEL_FILE = os.path.join(MODEL_DIR, "tft_model.pth")
 PARAMS_FILE = os.path.join(MODEL_DIR, "tft_model_params.json")
+SCALER_FILE = os.path.join(MODEL_DIR, "scaler.pkl")
+
 
 GROUP_COLS = ["status", "is_droplet"]
 METRICS = ["placed_gmv", "delivered_gmv", "cancelled_gmv"]
@@ -65,37 +72,65 @@ def create_model(logger: TensorBoardLogger) -> TFTModel:
     return TFTModel(log_tensorboard=True, tensorboard_logger=logger, **MODEL_PARAMS)
 
 
-def train_model(series_list: List[TimeSeries]) -> TFTModel:
+def train_model(series_list: List[TimeSeries]) -> Tuple[TFTModel, Scaler]:
+    """Train the TFT model and persist both model and scaler."""
     ensure_dirs()
     logger = TensorBoardLogger(LOG_DIR, name="tft")
 
-    if os.path.exists(MODEL_FILE):
+    if os.path.exists(MODEL_FILE) and os.path.exists(SCALER_FILE):
         model = TFTModel.load(MODEL_FILE)
+        with open(SCALER_FILE, "rb") as f:
+            scaler = pickle.load(f)
+
     else:
         model = create_model(logger)
         scaler = Scaler()
         series_scaled = [scaler.fit_transform(s) for s in series_list]
         model.fit(series_scaled, verbose=True)
         model.save(MODEL_FILE)
+
+        with open(SCALER_FILE, "wb") as f:
+            pickle.dump(scaler, f)
         with open(PARAMS_FILE, "w") as f:
             import json
             json.dump(MODEL_PARAMS, f, indent=2)
-    return model
+    return model, scaler
 
 
-def forecast_and_plot(model: TFTModel, series_list: List[TimeSeries], horizon: int = 7):
+def forecast_and_plot(
+    model: TFTModel,
+    series_list: List[TimeSeries],
+    scaler: Scaler | None = None,
+    horizon: int = 7,
+):
+    """Use the trained model to forecast and save result plots."""
+    if scaler is None:
+        if os.path.exists(SCALER_FILE):
+            with open(SCALER_FILE, "rb") as f:
+                scaler = pickle.load(f)
+        else:
+            scaler = Scaler()
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     plot_dir = os.path.join(PLOTS_DIR, timestamp)
     os.makedirs(plot_dir, exist_ok=True)
 
-    scaler = Scaler()
-    scaled_series = [scaler.fit_transform(s) for s in series_list]
+
+
+
+        scaled_series = [scaler.transform(s) for s in series_list]
+
     forecasts = [model.predict(horizon, s) for s in scaled_series]
 
     for i, (orig, pred) in enumerate(zip(series_list, forecasts)):
         df_orig = orig.pd_dataframe()
         df_pred = pred.pd_dataframe()
-        fig_path = os.path.join(plot_dir, f"series_{i}.png")
+
+        status = orig.static_covariates["status"].iloc[0]
+        droplet = orig.static_covariates["is_droplet"].iloc[0]
+        filename = f"series_{i}_{status}_{droplet}.png"
+        fig_path = os.path.join(plot_dir, filename)
+
         ax = df_orig[TARGET_COL].plot(label="actual")
         df_pred[TARGET_COL].plot(ax=ax, label="forecast")
         ax.legend()
@@ -109,33 +144,28 @@ import numpy as np
 def backtest_and_save(
     model: TFTModel,
     series_list: List[TimeSeries],
+
+    scaler: Scaler | None = None,
     test_fraction: float = 0.2,
     z_thresh: float = 3.0,
 ):
-    """Backtest the model and record detected anomalies.
-
-    Parameters
-    ----------
-    model : TFTModel
-        The trained TFT model.
-    series_list : List[TimeSeries]
-        List of time series to evaluate.
-    test_fraction : float, optional
-        Fraction of the series to reserve for validation, by default ``0.2``.
-    z_thresh : float, optional
-        Z-score threshold to flag anomalies, by default ``3.0``.
-    """
+    """Backtest using the trained model and record anomalies."""
+    if scaler is None:
+        if os.path.exists(SCALER_FILE):
+            with open(SCALER_FILE, "rb") as f:
+                scaler = pickle.load(f)
+        else:
+            scaler = Scaler()
 
     anomalies = []
-    scaler = Scaler()
 
     for idx, series in enumerate(series_list):
-        series = scaler.fit_transform(series)
         status = series.static_covariates["status"].iloc[0]
-        is_droplet = series.static_covariates["is_droplet"].iloc[0]
+        droplet = series.static_covariates["is_droplet"].iloc[0]
 
+        series = scaler.transform(series)
         train, val = series.split_before(1 - test_fraction)
-        model.fit([train], verbose=False)
+
         pred = model.predict(len(val), train)
 
         resid = (val - pred).pd_dataframe()
@@ -150,7 +180,8 @@ def backtest_and_save(
                     "series": idx,
                     "time": time,
                     "status": status,
-                    "is_droplet": is_droplet,
+
+                    "is_droplet": droplet,
                     **row.to_dict(),
                 }
             )
@@ -169,9 +200,11 @@ def backtest_and_save(
 
 def main():
     series_list = load_series()
-    model = train_model(series_list)
-    forecast_and_plot(model, series_list)
-    backtest_and_save(model, series_list)
+
+    model, scaler = train_model(series_list)
+    forecast_and_plot(model, series_list, scaler)
+    backtest_and_save(model, series_list, scaler)
+
 
 
 if __name__ == "__main__":
