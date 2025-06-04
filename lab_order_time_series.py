@@ -106,26 +106,65 @@ def forecast_and_plot(model: TFTModel, series_list: List[TimeSeries], horizon: i
 
 import numpy as np
 
-def backtest_and_save(model: TFTModel, series_list: List[TimeSeries], test_fraction: float = 0.2, z_thresh: float = 3.0):
+def backtest_and_save(
+    model: TFTModel,
+    series_list: List[TimeSeries],
+    test_fraction: float = 0.2,
+    z_thresh: float = 3.0,
+):
+    """Backtest the model and record detected anomalies.
+
+    Parameters
+    ----------
+    model : TFTModel
+        The trained TFT model.
+    series_list : List[TimeSeries]
+        List of time series to evaluate.
+    test_fraction : float, optional
+        Fraction of the series to reserve for validation, by default ``0.2``.
+    z_thresh : float, optional
+        Z-score threshold to flag anomalies, by default ``3.0``.
+    """
+
     anomalies = []
     scaler = Scaler()
 
     for idx, series in enumerate(series_list):
         series = scaler.fit_transform(series)
+        status = series.static_covariates["status"].iloc[0]
+        is_droplet = series.static_covariates["is_droplet"].iloc[0]
+
         train, val = series.split_before(1 - test_fraction)
         model.fit([train], verbose=False)
         pred = model.predict(len(val), train)
+
         resid = (val - pred).pd_dataframe()
         mean = resid.mean()
         std = resid.std()
         z = ((resid - mean) / std).abs()
         anom = z[z > z_thresh].dropna(how="all")
+
         for time, row in anom.iterrows():
-            anomalies.append({"series": idx, "time": time, **row.to_dict()})
+            anomalies.append(
+                {
+                    "series": idx,
+                    "time": time,
+                    "status": status,
+                    "is_droplet": is_droplet,
+                    **row.to_dict(),
+                }
+            )
+
     if anomalies:
         import pandas as pd
+
         df_anom = pd.DataFrame(anomalies)
         df_anom.to_csv(os.path.join(PLOTS_DIR, "anomalies.csv"), index=False)
+
+        counts = (
+            df_anom.groupby(["status", "is_droplet"]).size().reset_index(name="count")
+        )
+        counts.to_csv(os.path.join(PLOTS_DIR, "anomaly_counts.csv"), index=False)
 
 
 def main():
