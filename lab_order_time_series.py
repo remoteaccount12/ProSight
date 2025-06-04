@@ -45,6 +45,7 @@ def ensure_dirs():
 def load_series() -> List[TimeSeries]:
     df = pd.read_csv(DATA_FILE)
     df["date"] = pd.to_datetime(df["date"])
+    df[METRICS] = df[METRICS].fillna(0)
 
     grouped = (
         df.groupby(GROUP_COLS + ["date"], as_index=False)[METRICS].sum()
@@ -58,11 +59,19 @@ def load_series() -> List[TimeSeries]:
         value_cols=METRICS,
         freq="D",
     )
+    min_len = MODEL_PARAMS["input_chunk_length"] + MODEL_PARAMS["output_chunk_length"]
+    series_list = [s for s in series_list if len(s) >= min_len]
     return series_list
 
 
 def create_model(logger: TensorBoardLogger) -> TFTModel:
-    return TFTModel(log_tensorboard=True, tensorboard_logger=logger, **MODEL_PARAMS)
+    return TFTModel(
+        log_tensorboard=True,
+        pl_trainer_kwargs={"logger": logger},
+        use_static_covariates=True,
+        add_relative_index=True,
+        **MODEL_PARAMS,
+    )
 
 
 def train_model(series_list: List[TimeSeries]) -> TFTModel:
